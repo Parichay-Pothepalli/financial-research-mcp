@@ -10,6 +10,8 @@ import os
 import httpx
 import logging
 import sys
+import datetime
+from typing import Dict, List, Optional, Union, Any
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -356,6 +358,383 @@ def create_server():
 
         # Stringify the SEC filings
         return json.dumps(filings, indent=2)
+
+    @server.tool()
+    async def analyze_financial_ratios(
+        ticker: str,
+        time_period: str = "latest",  # Options: "latest", "quarterly", "annual", "5y"
+        ratio_types: str = "all",  # Options: "all", "profitability", "valuation", "liquidity", "solvency"
+        ctx: Context = None,
+    ) -> str:
+        """Analyze financial ratios for a company.
+        
+        Args:
+            ticker: Ticker symbol of the company (e.g. AAPL, GOOGL)
+            time_period: Time period for analysis (latest, quarterly, annual, 5y)
+            ratio_types: Types of ratios to include (all, profitability, valuation, liquidity, solvency)
+        """
+        try:
+            # Determine the period and limit based on time_period
+            if time_period == "latest":
+                period = "quarterly"
+                limit = 1
+            elif time_period == "quarterly":
+                period = "quarterly"
+                limit = 4  # Last 4 quarters
+            elif time_period == "annual":
+                period = "annual"
+                limit = 1
+            elif time_period == "5y":
+                period = "annual"
+                limit = 5  # Last 5 years
+            else:
+                period = "quarterly"
+                limit = 1
+            
+            # Fetch required financial data
+            # 1. Income Statements
+            income_url = f"{FINANCIAL_DATASETS_API_BASE}/financials/income-statements/?ticker={ticker}&period={period}&limit={limit}"
+            income_data = await make_request(income_url, ctx)
+            if not income_data or "income_statements" not in income_data or not income_data["income_statements"]:
+                return json.dumps({"error": "Unable to fetch income statements for ratio analysis."}, indent=2)
+            
+            income_statements = income_data["income_statements"]
+            
+            # 2. Balance Sheets
+            balance_url = f"{FINANCIAL_DATASETS_API_BASE}/financials/balance-sheets/?ticker={ticker}&period={period}&limit={limit}"
+            balance_data = await make_request(balance_url, ctx)
+            if not balance_data or "balance_sheets" not in balance_data or not balance_data["balance_sheets"]:
+                return json.dumps({"error": "Unable to fetch balance sheets for ratio analysis."}, indent=2)
+            
+            balance_sheets = balance_data["balance_sheets"]
+            
+            # 3. Cash Flow Statements
+            cash_flow_url = f"{FINANCIAL_DATASETS_API_BASE}/financials/cash-flow-statements/?ticker={ticker}&period={period}&limit={limit}"
+            cash_flow_data = await make_request(cash_flow_url, ctx)
+            if not cash_flow_data or "cash_flow_statements" not in cash_flow_data or not cash_flow_data["cash_flow_statements"]:
+                return json.dumps({"error": "Unable to fetch cash flow statements for ratio analysis."}, indent=2)
+            
+            cash_flow_statements = cash_flow_data["cash_flow_statements"]
+            
+            # 4. Current Stock Price (for valuation ratios)
+            price_url = f"{FINANCIAL_DATASETS_API_BASE}/prices/snapshot/?ticker={ticker}"
+            price_data = await make_request(price_url, ctx)
+            if not price_data or "snapshot" not in price_data or not price_data["snapshot"]:
+                return json.dumps({"error": "Unable to fetch current stock price for ratio analysis."}, indent=2)
+            
+            stock_price = price_data["snapshot"].get("price", 0)
+            market_cap = price_data["snapshot"].get("market_cap", 0)
+            
+            # Calculate financial ratios based on the data
+            ratios = {}
+            analysis = {}
+            
+            # Process each time period
+            for i in range(min(len(income_statements), len(balance_sheets), len(cash_flow_statements))):
+                income = income_statements[i]
+                balance = balance_sheets[i]
+                cash_flow = cash_flow_statements[i]
+                
+                period_date = income.get("date", "Unknown")
+                period_ratios = {}
+                period_analysis = {}
+                
+                # Extract key financial metrics
+                revenue = income.get("revenue", 0)
+                net_income = income.get("net_income", 0)
+                operating_income = income.get("operating_income", 0)
+                
+                total_assets = balance.get("total_assets", 0)
+                current_assets = balance.get("current_assets", 0)
+                total_liabilities = balance.get("total_liabilities", 0)
+                current_liabilities = balance.get("current_liabilities", 0)
+                total_equity = balance.get("total_equity", 0)
+                total_debt = balance.get("long_term_debt", 0) + balance.get("short_term_debt", 0)
+                
+                operating_cash_flow = cash_flow.get("operating_cash_flow", 0)
+                
+                # Calculate shares outstanding and EPS
+                shares_outstanding = market_cap / stock_price if stock_price > 0 else 0
+                eps = net_income / shares_outstanding if shares_outstanding > 0 else 0
+                
+                # Calculate ratios based on ratio_types parameter
+                if ratio_types in ["all", "profitability"]:
+                    # Profitability Ratios
+                    if total_equity > 0:
+                        roe = (net_income / total_equity) * 100
+                        period_ratios["return_on_equity"] = round(roe, 2)
+                        period_analysis["return_on_equity"] = analyze_roe(roe)
+                    
+                    if total_assets > 0:
+                        roa = (net_income / total_assets) * 100
+                        period_ratios["return_on_assets"] = round(roa, 2)
+                        period_analysis["return_on_assets"] = analyze_roa(roa)
+                    
+                    if revenue > 0:
+                        profit_margin = (net_income / revenue) * 100
+                        operating_margin = (operating_income / revenue) * 100
+                        period_ratios["profit_margin"] = round(profit_margin, 2)
+                        period_ratios["operating_margin"] = round(operating_margin, 2)
+                        period_analysis["profit_margin"] = analyze_profit_margin(profit_margin)
+                        period_analysis["operating_margin"] = analyze_operating_margin(operating_margin)
+                
+                if ratio_types in ["all", "valuation"]:
+                    # Valuation Ratios
+                    if eps > 0:
+                        pe_ratio = stock_price / eps
+                        period_ratios["price_to_earnings"] = round(pe_ratio, 2)
+                        period_analysis["price_to_earnings"] = analyze_pe_ratio(pe_ratio)
+                    
+                    if total_equity > 0 and shares_outstanding > 0:
+                        book_value_per_share = total_equity / shares_outstanding
+                        pb_ratio = stock_price / book_value_per_share if book_value_per_share > 0 else 0
+                        period_ratios["price_to_book"] = round(pb_ratio, 2)
+                        period_analysis["price_to_book"] = analyze_pb_ratio(pb_ratio)
+                    
+                    if revenue > 0 and market_cap > 0:
+                        ps_ratio = market_cap / revenue
+                        period_ratios["price_to_sales"] = round(ps_ratio, 2)
+                        period_analysis["price_to_sales"] = analyze_ps_ratio(ps_ratio)
+                
+                if ratio_types in ["all", "liquidity"]:
+                    # Liquidity Ratios
+                    if current_liabilities > 0:
+                        current_ratio = current_assets / current_liabilities
+                        period_ratios["current_ratio"] = round(current_ratio, 2)
+                        period_analysis["current_ratio"] = analyze_current_ratio(current_ratio)
+                        
+                        # Quick Ratio (assuming inventory is 20% of current assets as a simplification)
+                        inventory = current_assets * 0.2  # Simplified approximation
+                        quick_ratio = (current_assets - inventory) / current_liabilities
+                        period_ratios["quick_ratio"] = round(quick_ratio, 2)
+                        period_analysis["quick_ratio"] = analyze_quick_ratio(quick_ratio)
+                
+                if ratio_types in ["all", "solvency"]:
+                    # Solvency Ratios
+                    if total_equity > 0:
+                        debt_to_equity = total_debt / total_equity
+                        period_ratios["debt_to_equity"] = round(debt_to_equity, 2)
+                        period_analysis["debt_to_equity"] = analyze_debt_to_equity(debt_to_equity)
+                    
+                    if operating_income > 0:
+                        # Simplified interest expense calculation (assuming 5% interest rate on debt)
+                        interest_expense = total_debt * 0.05
+                        if interest_expense > 0:
+                            interest_coverage = operating_income / interest_expense
+                            period_ratios["interest_coverage"] = round(interest_coverage, 2)
+                            period_analysis["interest_coverage"] = analyze_interest_coverage(interest_coverage)
+                
+                # Add to overall results
+                ratios[period_date] = period_ratios
+                analysis[period_date] = period_analysis
+            
+            # Prepare the final result
+            result = {
+                "ticker": ticker,
+                "time_period": time_period,
+                "ratio_types": ratio_types,
+                "ratios": ratios,
+                "analysis": analysis,
+                "summary": generate_summary(ticker, ratios, analysis)
+            }
+            
+            return json.dumps(result, indent=2)
+        
+        except Exception as e:
+            logger.error(f"Error analyzing financial ratios: {str(e)}")
+            return json.dumps({"error": f"Failed to analyze financial ratios: {str(e)}"}, indent=2)
+
+    # Helper functions for ratio analysis
+    def analyze_roe(roe: float) -> str:
+        if roe > 20:
+            return "Excellent ROE, indicating very strong profitability and efficient use of shareholder equity."
+        elif roe > 15:
+            return "Strong ROE, above average returns on shareholder equity."
+        elif roe > 10:
+            return "Good ROE, decent returns on shareholder equity."
+        elif roe > 5:
+            return "Average ROE, moderate returns on shareholder equity."
+        else:
+            return "Below average ROE, indicating potential issues with profitability or capital efficiency."
+    
+    def analyze_roa(roa: float) -> str:
+        if roa > 10:
+            return "Excellent ROA, indicating very efficient use of assets to generate profits."
+        elif roa > 7:
+            return "Strong ROA, above average returns on assets."
+        elif roa > 5:
+            return "Good ROA, decent returns on assets."
+        elif roa > 3:
+            return "Average ROA, moderate returns on assets."
+        else:
+            return "Below average ROA, indicating potential issues with asset utilization."
+    
+    def analyze_profit_margin(margin: float) -> str:
+        if margin > 20:
+            return "Excellent profit margin, indicating strong pricing power and cost control."
+        elif margin > 15:
+            return "Strong profit margin, above average profitability."
+        elif margin > 10:
+            return "Good profit margin, decent profitability."
+        elif margin > 5:
+            return "Average profit margin, moderate profitability."
+        else:
+            return "Below average profit margin, indicating potential pricing or cost issues."
+    
+    def analyze_operating_margin(margin: float) -> str:
+        if margin > 25:
+            return "Excellent operating margin, indicating very efficient operations."
+        elif margin > 20:
+            return "Strong operating margin, above average operational efficiency."
+        elif margin > 15:
+            return "Good operating margin, decent operational efficiency."
+        elif margin > 10:
+            return "Average operating margin, moderate operational efficiency."
+        else:
+            return "Below average operating margin, indicating potential operational inefficiencies."
+    
+    def analyze_pe_ratio(pe: float) -> str:
+        if pe > 30:
+            return "High P/E ratio, indicating high growth expectations or potential overvaluation."
+        elif pe > 20:
+            return "Above average P/E ratio, suggesting strong growth expectations."
+        elif pe > 15:
+            return "Average P/E ratio, in line with typical market valuations."
+        elif pe > 10:
+            return "Below average P/E ratio, may indicate undervaluation or expected slow growth."
+        else:
+            return "Low P/E ratio, suggesting potential undervaluation or concerns about future earnings."
+    
+    def analyze_pb_ratio(pb: float) -> str:
+        if pb > 5:
+            return "High P/B ratio, indicating premium valuation relative to book value."
+        elif pb > 3:
+            return "Above average P/B ratio, suggesting strong market confidence."
+        elif pb > 2:
+            return "Average P/B ratio, in line with typical market valuations."
+        elif pb > 1:
+            return "Below average P/B ratio, may indicate undervaluation."
+        else:
+            return "Low P/B ratio, suggesting potential undervaluation or concerns about asset quality."
+    
+    def analyze_ps_ratio(ps: float) -> str:
+        if ps > 10:
+            return "High P/S ratio, indicating premium valuation relative to sales."
+        elif ps > 5:
+            return "Above average P/S ratio, suggesting strong growth expectations."
+        elif ps > 2:
+            return "Average P/S ratio, in line with typical market valuations."
+        elif ps > 1:
+            return "Below average P/S ratio, may indicate undervaluation."
+        else:
+            return "Low P/S ratio, suggesting potential undervaluation or concerns about sales growth."
+    
+    def analyze_current_ratio(ratio: float) -> str:
+        if ratio > 3:
+            return "Very high current ratio, indicating strong short-term liquidity but potentially inefficient use of assets."
+        elif ratio > 2:
+            return "Strong current ratio, suggesting solid short-term financial health."
+        elif ratio > 1.5:
+            return "Good current ratio, indicating healthy short-term liquidity."
+        elif ratio > 1:
+            return "Adequate current ratio, suggesting sufficient short-term liquidity."
+        else:
+            return "Low current ratio, indicating potential short-term liquidity concerns."
+    
+    def analyze_quick_ratio(ratio: float) -> str:
+        if ratio > 2:
+            return "Very strong quick ratio, indicating excellent short-term liquidity without relying on inventory."
+        elif ratio > 1.5:
+            return "Strong quick ratio, suggesting solid short-term financial health."
+        elif ratio > 1:
+            return "Good quick ratio, indicating healthy short-term liquidity."
+        elif ratio > 0.7:
+            return "Adequate quick ratio, suggesting sufficient short-term liquidity."
+        else:
+            return "Low quick ratio, indicating potential short-term liquidity concerns."
+    
+    def analyze_debt_to_equity(ratio: float) -> str:
+        if ratio > 2:
+            return "High debt-to-equity ratio, indicating significant leverage and potential financial risk."
+        elif ratio > 1.5:
+            return "Above average debt-to-equity ratio, suggesting substantial leverage."
+        elif ratio > 1:
+            return "Moderate debt-to-equity ratio, indicating balanced use of debt financing."
+        elif ratio > 0.5:
+            return "Conservative debt-to-equity ratio, suggesting prudent use of leverage."
+        else:
+            return "Very low debt-to-equity ratio, indicating minimal financial leverage."
+    
+    def analyze_interest_coverage(ratio: float) -> str:
+        if ratio > 8:
+            return "Excellent interest coverage ratio, indicating very strong ability to meet interest obligations."
+        elif ratio > 5:
+            return "Strong interest coverage ratio, suggesting solid ability to service debt."
+        elif ratio > 3:
+            return "Good interest coverage ratio, indicating adequate ability to meet interest payments."
+        elif ratio > 1.5:
+            return "Adequate interest coverage ratio, suggesting sufficient ability to service debt."
+        else:
+            return "Low interest coverage ratio, indicating potential concerns about debt servicing ability."
+    
+    def generate_summary(ticker: str, ratios: Dict, analysis: Dict) -> str:
+        """Generate an overall summary of the financial health based on the ratios."""
+        # Get the most recent period
+        if not ratios:
+            return f"Insufficient data to generate a summary for {ticker}."
+        
+        most_recent_period = list(ratios.keys())[0]
+        recent_ratios = ratios[most_recent_period]
+        recent_analysis = analysis[most_recent_period]
+        
+        # Count strengths and weaknesses
+        strengths = []
+        weaknesses = []
+        
+        # Check profitability
+        if "return_on_equity" in recent_ratios and recent_ratios["return_on_equity"] > 15:
+            strengths.append("strong return on equity")
+        elif "return_on_equity" in recent_ratios and recent_ratios["return_on_equity"] < 8:
+            weaknesses.append("weak return on equity")
+        
+        if "profit_margin" in recent_ratios and recent_ratios["profit_margin"] > 15:
+            strengths.append("high profit margins")
+        elif "profit_margin" in recent_ratios and recent_ratios["profit_margin"] < 5:
+            weaknesses.append("low profit margins")
+        
+        # Check liquidity
+        if "current_ratio" in recent_ratios and recent_ratios["current_ratio"] > 2:
+            strengths.append("strong liquidity")
+        elif "current_ratio" in recent_ratios and recent_ratios["current_ratio"] < 1:
+            weaknesses.append("liquidity concerns")
+        
+        # Check solvency
+        if "debt_to_equity" in recent_ratios and recent_ratios["debt_to_equity"] < 0.5:
+            strengths.append("low leverage")
+        elif "debt_to_equity" in recent_ratios and recent_ratios["debt_to_equity"] > 2:
+            weaknesses.append("high leverage")
+        
+        # Check valuation
+        if "price_to_earnings" in recent_ratios:
+            pe = recent_ratios["price_to_earnings"]
+            if pe < 15:
+                strengths.append("potentially undervalued (low P/E)")
+            elif pe > 30:
+                weaknesses.append("potentially overvalued (high P/E)")
+        
+        # Generate summary text
+        summary = f"Financial analysis for {ticker} as of {most_recent_period}: "
+        
+        if strengths and weaknesses:
+            summary += f"The company shows {', '.join(strengths)}, but has {', '.join(weaknesses)}."
+        elif strengths:
+            summary += f"The company demonstrates financial strength with {', '.join(strengths)}."
+        elif weaknesses:
+            summary += f"The company faces financial challenges including {', '.join(weaknesses)}."
+        else:
+            summary += "The company shows mixed financial indicators with no standout strengths or weaknesses."
+        
+        return summary
 
     # Add a resource
     @server.resource("history://financial-data")

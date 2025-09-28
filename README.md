@@ -49,16 +49,28 @@ The server accepts the following configuration parameters:
 
 ## Available Tools
 
+### Financial Data Retrieval
 - `get_income_statements`: Get income statements for a company
 - `get_balance_sheets`: Get balance sheets for a company
 - `get_cash_flow_statements`: Get cash flow statements for a company
 - `get_current_stock_price`: Get the current/latest price of a company
 - `get_historical_stock_prices`: Get historical stock prices for a company
 - `get_company_news`: Get news for a company
+- `get_sec_filings`: Get SEC filings for a company
+
+### Cryptocurrency Data
 - `get_available_crypto_tickers`: Get all available crypto tickers
 - `get_historical_crypto_prices`: Get historical prices for a cryptocurrency
 - `get_current_crypto_price`: Get the current/latest price of a cryptocurrency
-- `get_sec_filings`: Get SEC filings for a company
+
+### Financial Analysis
+- `analyze_financial_ratios`: Comprehensive financial ratio analysis including:
+  - **Profitability ratios**: ROE, ROA, profit margin, operating margin
+  - **Valuation ratios**: P/E, P/B, P/S ratios
+  - **Liquidity ratios**: Current ratio, quick ratio
+  - **Solvency ratios**: Debt-to-equity, interest coverage
+  - **Analysis**: Contextual interpretation of each ratio
+  - **Summary**: Overall financial health assessment
 
 ## Development
 
