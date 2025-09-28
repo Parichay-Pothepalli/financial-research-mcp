@@ -1,4 +1,5 @@
 # Financial Datasets MCP Server
+[![smithery badge](https://smithery.ai/badge/@Parichay-Pothepalli/financial-research-mcp)](https://smithery.ai/server/@Parichay-Pothepalli/financial-research-mcp)
 
 A financial data provider MCP server built with [Smithery CLI](https://smithery.ai/docs/getting_started/quickstart_build_python)
 
